@@ -13,6 +13,7 @@ from typing import Set, List
 
 import requests
 from bs4 import BeautifulSoup
+# 修复 fake_useragent 报错：禁用远程服务器，使用本地缓存
 from fake_useragent import UserAgent
 import undetected_chromedriver as uc
 
@@ -26,9 +27,9 @@ IP_PATTERN = re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b')
 OUTPUT_FILE = "ip.txt"
 RETRY_TIMES = 3
 TIMEOUT = 8
-RANDOM_JITTER = (1, 3)  # 随机暂停区间（秒）
+RANDOM_JITTER = (1, 3)
 
-# 目标站点
+# 目标站点（已移除失效的 cf.vvhan.com）
 URLS = [
     'https://ip.164746.xyz', 
     'https://cf.090227.xyz', 
@@ -36,7 +37,6 @@ URLS = [
     'https://ip.haogege.xyz/',
     'https://ct.090227.xyz',
     'https://cmcc.090227.xyz',    
-    'https://cf.vvhan.com',
     'https://api.uouin.com/cloudflare.html',
     'https://addressesapi.090227.xyz/CloudFlareYes',
     'https://addressesapi.090227.xyz/ip.164746.xyz',
@@ -48,12 +48,10 @@ URLS = [
     'https://www.wetest.vip/page/cloudflare/address_v4.html'
 ]
 
-# 免费代理池（可换成付费 API）
 PROXY_POOL_URL = "http://proxylist.geonode.com/api/proxy-list?limit=50&page=1&sort_by=lastChecked&sort_type=desc&protocols=http%2Chttps"
 
 # ---------- 工具 ----------
 class ProxyRotator:
-    """简易代理池，失败即弃用"""
     def __init__(self, proxy_api: str):
         self.api = proxy_api
         self.proxies: List[str] = []
@@ -74,7 +72,8 @@ class ProxyRotator:
         return self.proxies.pop() if self.proxies else ""
 
 proxy_rotator = ProxyRotator(PROXY_POOL_URL)
-ua = UserAgent()
+# 修复 fake_useragent 503 错误：禁用远程服务器
+ua = UserAgent(use_cache_server=False)
 
 def _random_headers() -> dict:
     return {
@@ -93,7 +92,6 @@ def _sort_ip(ip: str):
 
 # ---------- 请求 ----------
 def requests_fallback(url: str) -> str:
-    """先走 requests + 代理重试，不行再换 Selenium"""
     for attempt in range(1, RETRY_TIMES + 1):
         proxy = proxy_rotator.get()
         proxies = {"http": proxy, "https": proxy} if proxy else None
@@ -107,13 +105,11 @@ def requests_fallback(url: str) -> str:
             )
             if resp.status_code == 200:
                 return resp.text
-            # 触发 JS 挑战或 403/503 直接走浏览器
             if resp.status_code in (403, 503, 520, 521, 522, 525):
                 raise RuntimeError("CF Shield")
         except Exception as e:
             logging.warning("requests 失败: %s", e)
         _sleep()
-    # 终极方案：Undetected Chrome
     return _selenium_get(url)
 
 def _selenium_get(url: str) -> str:
@@ -125,7 +121,6 @@ def _selenium_get(url: str) -> str:
     driver = uc.Chrome(options=options)
     try:
         driver.get(url)
-        # 等待 5s 让 CF 5s 盾通过
         time.sleep(5)
         html = driver.page_source
         return html
@@ -148,15 +143,15 @@ def crawl() -> Set[str]:
 
 def save(ips: Set[str]):
     if not ips:
-        logging.warning("未采集到任何 IP")
-        return
+        logging.warning("未采集到任何 IP，保留旧的 ip.txt")
+        return  # 没抓到新IP时，不修改旧文件
     sorted_ips = sorted(ips, key=_sort_ip)
+    # 直接覆盖旧文件（而不是提前删除）
     with open(OUTPUT_FILE, "w", encoding="utf8") as f:
         f.write("\n".join(sorted_ips) + "\n")
-    logging.info("已保存 %d 条 IP 到 %s", len(sorted_ips), OUTPUT_FILE)
+    logging.info("已保存 %d 条 IP 到 %s（覆盖旧文件）", len(sorted_ips), OUTPUT_FILE)
 
 if __name__ == "__main__":
-    if os.path.exists(OUTPUT_FILE):
-        os.remove(OUTPUT_FILE)
-    ip_set = crawl()
-    save(ip_set)
+    # ！！！关键修改：删除了提前删除 ip.txt 的代码！！！
+    ip_set = crawl()  # 先抓取新IP
+    save(ip_set)      # 抓到新IP才覆盖，没抓到就保留旧文件
